@@ -98,6 +98,7 @@ library('fastDummies')
 library('sjPlot')
 library('effects')
 library('ape')
+library('MASS')
 
 ```
 
@@ -109,7 +110,7 @@ townhome and single family homes in Baltimore, Maryland.
 Given that Baltimore neighborhoods are highly racially segregated, this analysis sought to determine if there is an interaction between the effects of census block group racial composition and tree canopy cover on home price. Our null hypothesis was that canopy cover contributes similarly to home sale price in neighborhoods with contrasting racial compositions.
 
 ```{r set workspace, echo=FALSE}
-setwd("C:/Users/LabUser/Documents/Side_projects/BaltimoreTrees/Baltimore_Trees_R_Scripts")
+setwd("C:/Users/LabUser/Documents/Side_projects/BaltimoreTrees/Baltimore_Trees_R_Scripts/baltimore-trees-final")
 ```
 
 We collected ecological and socioeconomic data from various sources. We obtained
@@ -121,7 +122,9 @@ We obtained spatial data on parks, major roads, and other features from state an
 
 The full suite of predictor variables include:
 
-* Canopy Cover (CanCovPerc) 
+* Canopy Cover (CanCov30) within 30-m
+* CanCov100
+* CanCov400 
 * lnAcres (Natural log of property acreage)
 * YrBuilt (Year Built)
 * lnSqFt (Natural log of home square feet)
@@ -141,7 +144,7 @@ The full suite of predictor variables include:
 
 ```{r}
 ## Loading, cleaning and prepping data
-setwd("C:/Users/LabUser/Documents/Side_projects/BaltimoreTrees/Baltimore_Trees_R_Scripts")
+setwd("C:/Users/LabUser/Documents/Side_projects/BaltimoreTrees/Baltimore_Trees_R_Scripts/baltimore-trees-final")
 home_sale <- read.csv("all_homes_clean_final.csv")
 str(home_sale)
 
@@ -160,13 +163,30 @@ price_hist <- ggplot(home_sale, aes(x = Price)) +
 
 price_hist
 
+summary(home_sale$Price)
+
 ggsave("sale_price_histogram.png")
+
+
+# Drop unnecessary variables
+str(home_sale)
+home_sale <- subset(home_sale, select = -c(ConsideredPrice_spec, 
+                                           SaleMonth, SaleSeason, ACCTID_BaCi, 
+                                           ConsideredPrice_BaCi, 
+                                           csa2010, ACCTID_BaCi.1, cleanID2 
+                                            ))
+head(home_sale)
+
 
 ```
 
 ```{r}
 # The sale price distribution looks skewed; testing skewness
 skewness(home_sale$Price)
+
+# It is right-skewed skewed, suggesting a natural log transformation may be 
+# appropriate. But, we used a Box-Cox transformation of home_sale to justify 
+# the log-transform (see code chunk where base model is fit)
 
 # Transform response to natural log of sales price
 home_sale$lnPrice <- log(home_sale$Price)
@@ -184,75 +204,9 @@ any(is.na(home_sale))
 # summary(home_sale)
 # str(home_sale)
 
-# Drop unnecessary variables
-home_sale <- subset(home_sale, select = -c(cleanID, ConsideredPrice_spec, 
-                                           SaleMonth, ACCTID_BaCi, 
-                                           ConsideredPrice_BaCi, 
-                                           csa2010, ACCTID_BaCi.1, cleanID2 
-                                            ))
-# str(home_sale)
-
 ```
 
 ## Exploratory Data Analysis
-
-```{r}
-# Distributions of numeric variables
-
-home_sale_numeric <- subset(home_sale, select = -c(SaleSeason, Condition, 
-                                                    HousingType, ZipName, Price
-                                                   ))
-numeric_var_hists <- home_sale_numeric %>%
-                      gather() %>% 
-                      ggplot(aes(value)) +
-                      facet_wrap(~ key, scales = "free") +
-                      geom_histogram()
-numeric_var_hists
-
-# After multiple iterations of data exploration, modeling, and checking assumptions (as shown in the workflow below), I determined I should natural log-transform Median HH Income, Acres and SqFt because of skew that violates linear regression modeling assumptions of linear relationships between predictors and response.
-
-home_sale$lnAcres <- log(home_sale$Acres)
-hist(home_sale$lnAcres, breaks = 20)
-
-home_sale$lnSqFt <- log(home_sale$SqFt)
-hist(home_sale$lnSqFt, breaks = 20)
-
-home_sale$lnMedHHInc <- log(home_sale$MedHHInc)
-hist(home_sale$lnMedHHInc, breaks = 20)
-
-
-# Counts of factor variables
-
-home_sale_factor <- subset(home_sale, select = c(SaleSeason, Condition, 
-                                                 HousingType, ZipName
-                                                 ))
-
-apply(home_sale_factor, 2, table)
-
-# I ultimately left Sale Season out of the analysis because it was not
-# significant in any models.
-
-# Potential issue: If we use ZipName as a random effect, it may be 
-# problematic to have a Zip with only 1 sale (Catonsville)
-
-# Let's look at collinearity between variables to identify potentially
-# important/problematic correlations.
-
-home_sale_numeric2 <- subset(home_sale, select = -c(SaleSeason, Condition, HousingType, ZipName, Price, Acres, SqFt, MedHHInc
-                                                   ))
-corr_home_sale <- round(cor(home_sale_numeric2, method = c("spearman")), 2)
-corr_home_sale
-corrplot(corr_home_sale, method = c("ellipse"))
-
-# How to read this correlation plot: Blue indicates positive correlation, red
-# indicates negative correlation. The narrower the elipses, the stronger the
-# correlation.
-```
-
-Looking at the correlation matrix and plot, it's clear that Baltimore is highly 
-segregated due to the very high negative correlation between percent black and
-percent white in Census block groups. We'll proceed with the analysis using just
-one of these variables, percent black. Other potentially problematic high correlations between variables include crime indices Prop11 and Viol11, which makes sense. There seems to be almost no correlation between property crimes and home price, so I'm going to proceed only using violent crime. LnAcres and DistDT are highly correlated (0.74), so I'm going to keep an eye on the Variance Inflation Factors (VIFs) for these variables. 
 
 ```{r echo = FALSE, eval = FALSE}
 # Identifying differences between home condition classes
@@ -266,8 +220,29 @@ group_by(home_sale, Condition) %>%
     sd = sd(Price)
   )
  
+summary(home_sale$Condition)
+
+# There are so few "Excellents" that we should combine them with GOOD and 
+# recode them to GOOD_EX
+
+home_sale$Condition2[home_sale$Condition=="GOOD"] <- "GOODEX"
+home_sale$Condition2[home_sale$Condition=="EXCELLENT"] <- "GOODEX"
+home_sale$Condition2[home_sale$Condition=="POOR"] <- "POOR"
+home_sale$Condition2[home_sale$Condition=="FAIR"] <- "FAIR"
+home_sale$Condition2[home_sale$Condition=="AVERAGE"] <- "AVERAGE"
+
+# Convert the column to a factor and specify ordered vs. unordered factor
+# Note: If you specify an ordered factor, R will with a linear, quadratic, 
+# cubic etc. for each sequential level (and show up in the regression output as
+# levels with .L, .Q, and .C etc.)
+home_sale$Condition2 <- factor(home_sale$Condition2, levels = c("POOR", "FAIR", 
+                                                      "AVERAGE", "GOODEX"), 
+                                                      ordered = FALSE)
+summary(home_sale$Condition2)
+
 # Compute the analysis of variance
-cond.aov <- aov(lnPrice ~ Condition, data = home_sale)
+cond.aov <- aov(lnPrice ~ Condition2, data = home_sale)
+cond.aov
 # Summary of the analysis shows sig. diff. between groups.
 summary(cond.aov)
 # Look at pairwise differences, and it appears they're all sig. diff. from 
@@ -290,9 +265,120 @@ shapiro.test(x = cond_residuals)
 # residual distribution
 
 # Non-parametric Kruskal-Wallis rank sum test
-kruskal.test(lnPrice ~ Condition, data = home_sale)
+kruskal.test(lnPrice ~ Condition2, data = home_sale)
 # again confirms sig. differences between groups
 ```
+
+```{r}
+
+# Distributions of numeric variables
+str(home_sale)
+home_sale_numeric <- subset(home_sale, select = -c(Condition,
+                                                   Condition2, 
+                                                    HousingType, ZipName
+                                                   ))
+numeric_var_hists <- home_sale_numeric %>%
+                      gather() %>% 
+                      ggplot(aes(value)) +
+                      facet_wrap(~ key, scales = "free") +
+                      geom_histogram()
+numeric_var_hists
+
+# Summary statistics for predictor variables
+df_sum <- home_sale_numeric %>%
+  summarise_each(list(min = min,
+                      median = median, 
+                      mean = mean,
+                      max = max,
+                      sd = sd))
+head(df_sum)
+
+df_sum_tidy <- df_sum %>% 
+  gather(stat, val) %>%
+  separate(stat, into = c("var", "stat"), sep = "_") %>%
+             spread(stat, val) %>%
+             select(var, min, median, mean, max, sd)
+print(df_sum_tidy)
+  
+
+# After multiple iterations of data exploration, modeling, and checking 
+# assumptions (as shown in the workflow below), I determined I should natural 
+# log-transform Median HH Income, Acres and SqFt because of skew that violates 
+# linear regression modeling assumptions of linear relationships between 
+# predictors and response.
+
+home_sale$lnAcres <- log(home_sale$Acres)
+hist(home_sale$lnAcres, breaks = 20)
+
+home_sale$lnSqFt <- log(home_sale$SqFt)
+hist(home_sale$lnSqFt, breaks = 20)
+
+home_sale$lnMedHHInc <- log(home_sale$MedHHInc)
+hist(home_sale$lnMedHHInc, breaks = 20)
+
+# I will also try log-tranformed versions of the proximity variables.
+home_sale$lnDistDT <- log(home_sale$DistDT)
+hist(home_sale$lnDistDT, breaks = 20)
+
+home_sale$lnDistRoad <- log(home_sale$DistRoad)
+hist(home_sale$lnDistRoad, breaks = 20)
+
+home_sale$lnDistParks <- log(home_sale$DistParks)
+hist(home_sale$lnDistParks, breaks = 20)
+
+# Counts of factor variables
+
+home_sale_factor <- subset(home_sale, select = c(SaleSeason, Condition, 
+                                                 HousingType, ZipName
+                                                 ))
+
+apply(home_sale_factor, 2, table)
+
+# Making "donut" percent cover estimates
+
+# Comparing correlations between different canopy cover measures
+cancov <- subset(home_sale, select = c(CanCovPerc, CanCov100, CanCov200,
+                                       CanCov400
+                                                 ))
+cor(cancov)
+
+cancov <- subset(home_sale, select = c(CanCovPerc_bilin, CanCov100, CanCov200, CanCov400, cancov_sum30, cancov_sum100, cancov_sum30_100, 
+                                       cancov_sum400, cancov_sum100_400
+                                                 ))
+cor(cancov)
+# all of the canopy cover variables are highly co-linear; the lowest
+# correlation is between cancov_sum30 and cancov_sum100_400 (i.e. canopy
+# cover within a 30-m radius and total canopy cover within a 100-400m radius)
+
+# I ultimately left Sale Season out of the analysis because it was not
+# significant in any models.
+
+# Potential issue: If we use ZipName as a random effect, it may be 
+# problematic to have a Zip with only 1 sale (Catonsville)
+
+# Let's look at collinearity between variables to identify potentially
+# important/problematic correlations.
+str(home_sale)
+
+home_sale_numeric2 <- subset(home_sale, select = -c(Condition, Condition2, 
+                                                    HousingType, ZipName, Price
+                                                   ))
+corr_home_sale <- round(cor(home_sale_numeric2, method = c("spearman")), 2)
+corr_home_sale
+corrplot(corr_home_sale, method = c("ellipse"))
+
+# How to read this correlation plot: Blue indicates positive correlation, red
+# indicates negative correlation. The narrower the elipses, the stronger the
+# correlation.
+
+```
+
+Looking at the correlation matrix and plot, it's clear that Baltimore is highly 
+segregated due to the very high negative correlation between percent black and
+percent white in Census block groups. We'll proceed with the analysis using just
+one of these variables, percent black. Other potentially problematic high correlations between variables include crime indices Prop11 and Viol11, which makes sense. There seems to be almost no correlation between property crimes and home price, so I'm going to proceed only using violent crime. LnAcres and DistDT are highly correlated (0.74), so I'm going to keep an eye on the Variance Inflation Factors (VIFs) for these variables. 
+
+
 
 # More Exploratory Analyses
 
@@ -334,7 +420,9 @@ plot(lnPrice ~ YrBuilt, data = home_sale)
 plot(lnPrice ~ lnSqFt, data = home_sale)
 plot(lnPrice ~ Bath, data = home_sale)
 plot(lnPrice ~ Viol11, data = home_sale)
-plot(lnPrice ~ CanCovPerc, data = home_sale)
+plot(lnPrice ~ cancov_sum30, data = home_sale)
+plot(lnPrice ~ cancov_sum30_100, data = home_sale)
+plot(lnPrice ~ cancov_sum100_400, data = home_sale)
 plot(lnPrice ~ DistDT, data = home_sale)
 plot(lnPrice ~ DistRoad, data = home_sale)
 plot(lnPrice ~ DistParks, data = home_sale)
@@ -363,25 +451,6 @@ plot(CanCovPerc ~ PercB, data = home_sale)
 # not sure if it justifies a quadratic form. I'll test this in the
 # regressions.
 
-# Drop other unnecessary variables (in preliminary regressions SaleSeason had
-# no predictive ability, so I'm dropping it now).
-
-home_sale <- subset(home_sale, select = -c(SaleSeason, Acres, SqFt, Prop11,
-                                           MedHHInc, PercW
-                                            ))
-# head(home_sale)
-
-# Center and standardize all numeric variables before regression modeling.
-
-cols <- c(1, 2, 6:14, 19:21)
-home_sale[, cols] <- lapply(home_sale[, cols], function(x) {
-  y<-scale(x, center=TRUE, scale=TRUE)
-  }
-)
-# summary(home_sale)
-
-any(is.na(home_sale))
-# test
 ```
 
 ## Fit multiple linear regression models
@@ -413,17 +482,53 @@ This initial model did not include any variable interactions. We evaluated wheth
 
 4. For all models, we tested model performance by fitting the models on 75% of the dataframe (the training set) and predicting the remaining 25% (the test set).
 
-
 ```{r}
+# Revise this chunk to simplify the dataset and scale variables as necessary 
+# Drop other unnecessary variables (in preliminary regressions SaleSeason had
+# no predictive ability, so I'm dropping it).
 
-# Fit initial MLR 
+# Center and standardize all numeric variables before regression modeling.
+dim(home_sale)
+str(home_sale)
+cols <- c(2:5, 9:30, 34:39)
+home_sale[, cols] <- lapply(home_sale[, cols], function(x) {
+  y<-scale(x, center=TRUE, scale=TRUE)
+  }
+)
+# summary(home_sale)
+
+any(is.na(home_sale))
+# test
+```
+
+
+```{r fit initial model and use BoxCox}
+
+# Fit initial MLRs testing different canopy cover radii 
+
+head(home_sale)
+
 
 home_model1 <- lm(lnPrice ~ lnAcres + YrBuilt + lnSqFt + Bath 
-                        + Condition + HousingType + Viol11 + CanCovPerc + 
-                        DistDT + DistRoad + DistParks + PercHS + lnMedHHInc +
+                        + Condition2 + HousingType + Viol11 + cancov_sum30 + 
+                        lnDistDT + lnDistRoad + lnDistParks + PercHS + lnMedHHInc +
                         PercOwnOcc + MedAge + PercB, data = home_sale)
 
 summary(home_model1)
+
+home_model1b <- lm(lnPrice ~ lnAcres + YrBuilt + lnSqFt + Bath 
+                        + Condition2 + HousingType + Viol11 + cancov_sum30_100 + 
+                        lnDistDT + lnDistRoad + lnDistParks + PercHS + lnMedHHInc +
+                        PercOwnOcc + MedAge + PercB, data = home_sale)
+
+summary(home_model1b)
+
+home_model1c <- lm(lnPrice ~ lnAcres + YrBuilt + lnSqFt + Bath 
+                        + Condition2 + HousingType + Viol11 + cancov_sum100_400 + 
+                        lnDistDT + lnDistRoad + lnDistParks + PercHS + lnMedHHInc +
+                        PercOwnOcc + MedAge + PercB, data = home_sale)
+
+summary(home_model1c)
 
 
 # Checking assumptions
@@ -431,6 +536,25 @@ plot(home_model1)
 # cook <- cooks.distance(home_model1)
 
 # Residuals look OK. Some heterosckedasticity with less variance at higher values. 
+
+# Let's try a box-cox transformation. Make sure Price var is not scaled.
+summary(home_sale$Price)
+b <- boxcox(Price ~ lnAcres + YrBuilt + lnSqFt + Bath 
+                        + Condition2 + HousingType + Viol11 + CanCovPerc + 
+                        DistDT + DistRoad + DistParks + PercHS + lnMedHHInc +
+                        PercOwnOcc + MedAge + PercB, data = home_sale)
+lambda <- b$x # lambda values
+
+lik <- b$y # log likelihood values for SSE
+
+bc <- cbind(lambda, lik) # combine lambda and lik
+
+sorted_bc <- bc[order(-lik),] # values are sorted to identify the lambda value for the maximum log likelihood for obtaining minimum SSE
+
+head(sorted_bc, n = 10)
+# top Box-Cox value was 0.22, suggesting log transformation (lamda = 0) is 
+# appropriate.
+
 
 # Looking at outliers.
 # (home_sale[875,]) # This house is said to have sold for $1,049,000 in 2010, but it's a 3-bd, 1 bath townhouse with an estimate of $122,976. I think this sale price was entered incorrectly, and should be $104,900. Three other houses in the same census block all sold in 2010 for around $100,000, so I'm going to make the change [CHANGE MADE].
@@ -609,7 +733,7 @@ The Moran's I test indicates significant residual spatial autocorrelation (SAC) 
 # Linear mixed-effects model
 
 home_model_random1 <- lme(lnPrice ~ lnAcres + YrBuilt + lnSqFt + Bath 
-                        + Condition + HousingType + Viol11 + CanCovPerc 
+                        + Condition2 + HousingType + Viol11 + CanCovPerc 
                         + DistDT + DistRoad + DistParks + PercHS + lnMedHHInc 
                         + PercOwnOcc + MedAge + PercB, random = ~1|ZipName, 
                         method = "ML",  data = home_sale)

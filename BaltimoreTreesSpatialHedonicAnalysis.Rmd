@@ -1,0 +1,198 @@
+---
+title: "Baltimore Trees Spatial Hedonic Analysis"
+author: "Angela E. Boag"
+date: "July 28, 2019"
+output: html_document
+---
+
+Much of this code is adapted from BurkeyAcademy's R Spatial Regression
+tutorials found at https://sites.google.com/a/burkeyacademy.com/spatial/home
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r set workspace, echo=FALSE}
+setwd("C:/Users/LabUser/Documents/Side_projects/BaltimoreTrees/Baltimore_Trees_R_Scripts/baltimore-trees-final")
+```
+
+```{r cars}
+
+
+install.packages("spdep")
+install.packages("rgdal")
+install.packages("rgeos")
+install.packages("spatialreg")
+
+library(rgeos)
+library(rgdal)
+library(spatialreg)
+spat.data = readOGR(dsn = ".", layer = "all_homes_clean_final_logs")
+names(spat.data) #show variable names
+summary(spat.data)
+
+summary(spat.data@data$ZipName)
+
+#See how some of our quantitative variables are being treated like qualitative (e.g.PCI)
+#which is Per Capita Income (R lists frequencies rather than summary stats). 
+#This will cause problems. Fix this by overwriting these variables with a numeric version:
+spat.data$PCI=as.numeric(levels(spat.data$PCI))[spat.data$PCI]
+#Now summary will treat it as a number, calculating a mean. If we don't do this R thinks
+#These variables are categorical.
+
+spplot(spat.data,"Condition2") #make map
+
+#load library spdep, make weights matrix (nb type)
+library(spdep)
+
+coords <- subset(spat.data, select = c(Lon, Lat))
+str(coords)
+col.knn <- knearneigh(coords, k=4)
+home.knn <- knn2nb(col.knn)
+knn.listw <- nb2listw(home.knn, style = "W") # convert nb matrix to listw type
+
+# For polygons only
+# queen.nb=poly2nb(spat.data) 
+# queen.listw=nb2listw(queen.nb) #convert nb to listw type
+# listw1= queen.listw # rename for simplicity 
+
+# CanCov vars
+# cancov_sum: cancov_sum30
+# cancov_s_1: cancov_sum100
+# cancov_s_2: cancov_sum30_100
+# cancov_s_3: cancov_sum400
+# cancov_s_4: cancov_sum100_400
+
+```
+
+```{r OLS regression, echo=FALSE}
+
+# define our regression equation so we don't have to type it each time
+# Note that when you load it as a spatial list object it cuts off/changes some
+# of the variable names so they need to be adapted
+# I excluded lnAcres because it's correlation > 0.7 with nearly
+# all the canopy variables, and lnDistDT
+# 
+reg.eq1 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + cancov_sum + 
+                        cancov_s_4 + lnDistDT + lnDistRoad + lnDistPark + 
+                        PercHS + lnMedHHInc + PercOwnOcc + MedAge + PercB
+
+
+#turn off scientific notation for reasonably-sized values
+options(scipen=5)
+
+#Let's run the Four simplest models: OLS, SLX, Lag Y, and Lag Error
+#OLS
+reg1 = lm(reg.eq1, data = spat.data)
+
+summary(reg1)
+
+lm.morantest(reg1, knn.listw, alternative = "two.sided")
+lm.LMtests(reg1, knn.listw, test="all")
+# Since both the LMerr abnd LMlag are both statistically significant from zero, we need to look at their robust counterparts. The one with the smaller p value. This suggests the spatial error model (SEM) is the more likely alternative.  
+
+```
+```{r SEM Spatial Error Model, echo = FALSE}
+
+reg2 <- errorsarlm(reg.eq1, data=spat.data, knn.listw)
+summary(reg2)
+
+# Likelihood ratio test to see if SEM is superior to OLS
+
+LR.sarlm(reg1, reg2)
+# LR test is highly significant, indicating that SEM is superior
+# to OLS
+
+Hausman.test(reg2)
+# Hausman test suggests even SEM may not be appropriate..
+
+``` 
+
+```{r testing different cancov vars}
+# CanCov vars
+# cancov_sum: cancov_sum30
+# cancov_s_1: cancov_sum100
+# cancov_s_2: cancov_sum30_100
+# cancov_s_3: cancov_sum400
+# cancov_s_4: cancov_sum100_400
+
+reg.can100 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + cancov_s_1 +
+                        lnDistDT + lnDistRoad + lnDistPark + PercHS + 
+                        lnMedHHInc + PercOwnOcc + MedAge + PercB
+
+reg.can30_100 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + cancov_s_2 +
+                        lnDistDT + lnDistRoad + lnDistPark + PercHS + 
+                        lnMedHHInc + PercOwnOcc + MedAge + PercB
+
+reg.can400 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + cancov_s_3 +
+                        lnDistDT + lnDistRoad + lnDistPark + PercHS + 
+                        lnMedHHInc + PercOwnOcc + MedAge + PercB
+  
+reg.can100_400 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + cancov_s_4 +
+                        lnDistDT + lnDistRoad + lnDistPark + PercHS + 
+                        lnMedHHInc + PercOwnOcc + MedAge + PercB
+
+reg.can <- errorsarlm(reg.can100_400, data=spat.data, knn.listw)
+reg2$AIC
+reg.can$AIC
+
+# After testing various canopy cover buffers, the best model (lowest AIC) is
+# the one containing both the 
+
+```
+
+```{r testing interactions with race and crime}
+reg.int1 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + Viol11 + lnDistDT + 
+                        lnDistRoad + lnDistPark + PercHS + lnMedHHInc + 
+                        PercOwnOcc + MedAge + 
+                        PercB*cancov_sum
+
+
+sem.int1 <- errorsarlm(reg.int1, data=spat.data, knn.listw)
+summary(sem.int1)
+# Interaction bw PercB and CanCov is not significant; same result as before
+
+#Interaction between violent crime and CanCov
+reg.int2 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + lnDistDT + 
+                        lnDistRoad + lnDistPark + PercHS + lnMedHHInc + 
+                        PercOwnOcc + MedAge + PercB +
+                        Viol11*cancov_sum
+
+sem.int2 <- errorsarlm(reg.int2, data=spat.data, knn.listw)
+summary(sem.int2)
+
+#Interaction between violent crime, CanCov and PercB
+reg.int3 <- lnPrice ~ ZipName + YrBuilt + I(YrBuilt^2) + lnSqFt + Bath +
+                        Condition2 + HousingTyp + lnDistDT + 
+                        lnDistRoad + lnDistPark + PercHS + lnMedHHInc + 
+                        PercOwnOcc + MedAge + 
+                        Viol11*cancov_sum*PercB
+
+sem.int3 <- errorsarlm(reg.int3, data=spat.data, knn.listw)
+summary(sem.int3)
+
+# Same results as previously
+
+```
+
+```{r residual plots}
+spat.data@data$home.ols.res<-resid(reg1) #residuals ols
+
+spat.data@data$home.sem.res<-resid(reg2) #residual sem
+
+library(RColorBrewer)
+
+spplot(spat.data, "home.ols.res", at=seq(min(spat.data@data$home.ols.res, na.rm=TRUE), max(spat.data@data$home.ols.res, na.rm=TRUE),length=12),col.regions=rev(brewer.pal(11,"RdBu")))
+
+spplot(spat.data, "home.sem.res", at=seq(min(spat.data@data$home.sem.res, na.rm=TRUE), max(spat.data@data$home.sem.res, na.rm=TRUE),length=12),col.regions=rev(brewer.pal(11,"RdBu")))
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
